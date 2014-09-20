@@ -1,0 +1,8 @@
+Model,Training Set,Validation Set
+rpart (best),0.959,0.927
+knn(knnFit1),0.956,0.904
+gbm,0.973,0.957
+random forest 1,1,0.991
+random forest 2,1,0.992
+random forest 3,1,0.994
+random forest 4,1,0.992
