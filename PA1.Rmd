@@ -1,0 +1,292 @@
+---
+title: "Practical Machine Learning Project"
+output: html_document
+---
+
+## **Executive Summary**
+
+* The project involved a five-factor classification and prediction problem.  
+
+* The processed raw training data was 70:30 split into Training and Validation sets.  Models were traind on the former and were evaluated on the latter.  
+
+* Raw data drawn from the Weight Lifting Exercise Dataset were examined.  A number of computed summary variables not present in the Testing dataset were omitted.  In addition, it _is demonstrated_ that certain timeseries-related and bookkeeping variables "leak" information on the specifics of the protocol -- while these are likely powerful predictors for the Testing set, they could not be generalized to any other context and hence were removed.  The problematic variables/columns were subsequently removed from the Training, Validation, and Testing sets.  
+
+* For each of several classification methods, tuning and some other parameters were adjusted to roughly optimize the results.  Computationally undemanding approaches (CART using rpart, K-nearest neighbor approaches under caret) provided were inferior to Generalized Boosted Regression Modeling (gbm). Random Forest models performed slightly better than GBM at comparable computation expenditures. 
+
+* Several RF models were trained using different resampling methods, tuning parameters, and packages.  Results from four RF models are described in this report. All of the models displayed 0 training set error and less than 1% validation set error.  
+
+* All of the RF models, as well as the GBM model, yielded the same predictions when applied to the Testing set.
+
+  
+## **Introduction**
+
+For brevity, we assume that general motivations and methods of "Qualitative Activity Recognition of Weight Lifting Exercises", Velloso, Bulling _et al._, are known to the reader.  A few details are recapitulated.  Six volunteers performed a particular weightlifting exercise (sets of 10 reps) in a specified correct manner and in four distinct incorrect ways.  Movements were captured using an array of four motion sensors -- affixed to the subjects' gloves, armbands, and belts, as well as to the dumbbell.  Readings were recorded in time series employing a range of "sliding window" sizes.    
+
+## **The Data As Provided**
+
+At every time point movement along three spacial axis for each of the four sensors provides 36 variables.  Roll, pitch, and yaw were derived for each sensor at each time point (12 variables).  Then, for each time window, eight statistical features were calculated for each of the twelve derived variables (96 "statistical" variables).  The raw training dataset contains 19622 time point observations of at least the direct and derived variables.  Prior to any analysis it was partitioned 70:30 into analysis Training and Validation sets.  
+
+
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(tree)
+library(rpart)
+library(gbm)
+library(ggplot2)
+library(plyr)
+library(randomForest)
+```
+
+```{r,cache=TRUE}
+raw.training <- read.csv("pml-training.csv")
+raw.testing <- read.csv("pml-testing.csv")
+
+set.seed(37360)
+inTrain <- createDataPartition(raw.training$classe, p=0.70, list = FALSE)
+rawTrain <- raw.training[inTrain,]
+rawValid <- raw.training[-inTrain,]
+```
+## **Time-Series Data**
+
+It seems entirely reasonable that time-series data and, _a fortiori_, statistical metrics computed from short time-series, would allow construction of good models for types of motion.  Removing the temporal element (time-series markers) may cripple the predictive power of models so derived.  Moreover, for many motion variables there are likely strong correlations among the measurements in a time series. Removing timestamp markers can hinder adjustment for those correlations.  
+
+### **Problematic Predictors**
+
+To illustrate the deceptive folly of retaining time and protocol data, I constructed a subset of the raw (but partitioned) training set --- retaining only "classe" and the predictors related to user, time and time window status.
+
+```{r,cache=TRUE}
+testFit1 <- train(classe ~ user_name + raw_timestamp_part_1 + raw_timestamp_part_2 + cvtd_timestamp + num_window, method = "gbm", data = rawTrain, verbose = F, trControl = trainControl(method = "cv", number = 5))
+```
+An unoptimized gbm model predicted the class with 0.2% training set error and __0.4% validation set error!__ Yet the model employs no sensor data and would be completely ungeneralizable. 
+
+```{r}
+predTest1 <- predict(testFit1, newdata = rawTrain)
+predVal1 <- predict(testFit1, newdata = rawValid)
+
+## Test Set Error
+confusionMatrix(predTest1, rawTrain$classe)$overall[1:2]
+
+## Validation Set Error
+confusionMatrix(predVal1, rawValid$classe)$overall[1:2]
+
+qplot(raw.training$raw_timestamp_part_1, raw.training$num_window, color = raw.training$classe)
+
+```
+
+
+### **Elimination of Spurious and Problematic Variables**
+
+In a more sophisticated analysis, time-series data would be retained, but timestamps _normalized_ to the initiation of an exercise or onset of a new window -- carefully stripped of adventitious identifiers that leak non-generalizable information. Such a project is beyond the scope of this exercise, and would be difficult to reconcile with the small "Testing Set" on which predictions are made.
+
+The timestamp, window variables, and all of the statistical variables were removed to create the **processed** Training, Validation, and Testing datasets. Username is retained (and used for _some_ models) --- while those particular factors would not be useful in another context, it might be reasonable to employ some identifier relating sensor data to subject. However, models that either omit username or rely very little on that variable will be favored.   
+
+```{r}
+sel <- c(2, 8:11, 37:49, 60:68, 85:86, 102, 113:124, 140, 151:160)
+Train <- rawTrain[, sel]
+Valid <- rawValid[, sel]
+```
+
+## **Models - Training the Processed Dataset**
+
+### **Model Building and Performance Measurement**
+
+* For essentially all of the models discussed in this report, resampling was performed using cross-validation --- "cv", "repeated cv", or "adaptive cv" --- rather than bootstrap methods.  That choice was driven by a desire to avoid excessive computational demands.  
+
+* In the initial training set, and hence in the partitioned Training and Validation sets, the five classification factors occur with roughly equal frequency.  Hence the simple "accuracy" measure is used to evaluate the various models.  
+
+
+### **CART -- Classification and Regression Trees**
+
+I first explored a series of CART models using the rpart package, with "gini" as the splitting index and the complexity parameter "cp" ranging from 0.05 to 0.  Sparse models had little predictive power, while the best result (cp = 0) used 45 variables to provide moderate accuracy (see below).  
+
+
+```{r,cache=TRUE}
+set.seed(74295)
+rpartFit2 <- rpart(classe ~., data = Train, method = "class", parms = list(split="ginni"), control = rpart.control(cp = 0.00))
+rpartPred2 <- predict(rpartFit2, newdata = Train, type = "class")
+rpartVal2 <- predict(rpartFit2, newdata = Valid, type = "class")
+
+## Training Set Accuracy
+confusionMatrix(rpartPred2, Train$classe)$overall[1:2]
+
+##Validation Set Accuracy
+confusionMatrix(rpartVal2, Valid$classe)$overall[1:2]
+```
+
+
+### **KNN Models**
+
+Several KNN models were trained using the knn method under caret.  For simplicity, the "user name" factor variable was omitted.  The models were not particularly accurate, as determined by validation set accuracy.  A typical example follows.
+
+```{r,eval=FALSE}
+trainD <- Train[,-1]
+validD <- Valid[, -1]
+
+set.seed(84934)
+ctrl <- trainControl(method = "repeatedcv", repeats = 5)
+knnFit1 <- train(classe~., data = trainD, method = "knn", tuneLength = 12, trControl = ctrl)
+```
+
+Accuracy was used to select the optimal model using  the largest value.
+The final value used for the model was k = 5.
+
+###### **Training Set Accuracy**  
+
+ Accuracy    |   Kappa 
+-------------|----------
+0.9561767    |  0.9445519 
+
+###### **Validation Set Accuracy**  
+
+ Accuracy    |  Kappa 
+-------------|----------
+0.9045030    |  0.8791939  
+
+
+### **Stochastic Gradient Boosting**
+
+Stochastic Gradient Boosting (gbm) was used to train several models. All gbm and random forest models were optimized using "cv" or "adaptive cv" methods, as computations that employed bootstrap techniques were too time-consuming. For the gbm model below, estimated training set error is 3.9% (mean of errors from ten CV runs); misclassification error on the training set is 2.7%.  Misclassification error on the validation set is 4.3%. Predictive power of the gbm models, while formidable, are eclipsed by random forest models.  
+
+**_The first entries are Training Set Accuracy. The Confusion Matrix and second set of figures reflect Validation Set Accuracy._**
+
+```{r,cache=TRUE, echo=FALSE}
+set.seed(87094)
+sgbTest1 <- train(classe ~ ., method = "gbm", data = Train, verbose = F, trControl = trainControl(method = "cv", number = 10))
+#sgbTest1
+predsgbTrain1 <- predict(sgbTest1, newdata = Train)
+predsgbVal1 <- predict(sgbTest1, newdata = Valid)
+sgbCMTrain1 <- confusionMatrix(predsgbTrain1, Train$classe)
+sgbCMVal1 <- confusionMatrix(predsgbVal1, Valid$classe)
+mean(sgbTest1$resample$Accuracy)
+
+## Training Set Accuracy
+postResample(predsgbTrain1, Train$classe)
+
+## Validation Set Accuracy
+sgbCMVal1$table
+postResample(predsgbVal1, Valid$classe)
+```
+
+```{r, echo=FALSE}
+Test <- raw.testing[, sel]
+TestPred1 <- predict(sgbTest1, newdata = Test)
+```
+
+
+## **Random Forest Models**
+
+Several random forest models were trained; four are included below.  All of the "perfectly predicted" the training set classification, and all were greater than 99% accurate classifying the validation set.
+
+These models are complicated; except as noted, default values were employed and not effort was made to remove "unimportant" predictors. In the third example (rfTrain3), randomForest was run without the intermediation of the train function, with ntree=2048. The consequent model had an insignificant numerical superiority over the others in validation set accuracy, but the username variable was a fairly important predictor. In contrast, the estimated importance of the username factors were extremely low for other models, particularly the second (rfTrain2). 
+
+The first two RF models were generated using the train function under caret with slightly different resampling parameters,
+
+
+#### **RF Model 1**  
+
+```{r,eval=FALSE}
+set.seed(68678)
+
+rfTrain1 <- train(classe ~ ., method = "rf", data = Train, importance = T, trControl = trainControl(method = "cv", number = 10))
+
+predrfTrain1 <- predict(rfTrain1, newdata = Train)
+predrfVal1 <- predict(rfTrain1, newdata = Valid)
+
+## Training Set Accuracy
+postResample(predrfTrain1, Train$classe)
+
+## Validation Set Accuracy
+postResample(predrfVal1, Valid$classe)
+
+```
+
+#### **RF Model 2**  
+
+```{r,cache=TRUE}
+set.seed(94388)
+
+
+ctrl2 <- trainControl(method = "adaptive_cv", repeats = 5, verboseIter = FALSE)
+rfTrain2 <- train(classe ~ ., method = "rf", data = Train, importance = T, trControl = ctrl2)
+predrfTrain2 <- predict(rfTrain2, newdata = Train)
+predrfVal2 <- predict(rfTrain2, newdata = Valid)
+rfCMTrain2 <- confusionMatrix(predrfTrain2, Train$classe)
+rfCMVal2 <- confusionMatrix(predrfVal2, Valid$classe)
+
+## Training Set Accuracy
+rfCMTrain2$table
+postResample(predrfTrain2, Train$classe)
+
+## Validation Set Accuracy
+rfCMVal2$table
+postResample(predrfVal2, Valid$classe)
+
+TestPred3 <- predict(rfTrain2, newdata = Test)
+# TestPred3
+
+```
+
+```{r}
+rfT2fM <- rfTrain2$finalModel
+varImpPlot(rfT2fM, sort=TRUE, n.var=min(30, nrow(rfT2fM$importance)), type=2, scale=TRUE, main ="Random Forest Model 2, Variable Importance")
+
+```
+
+```{r echo=FALSE}
+Q <- rfTrain2$finalModel$importance
+QQ <- data.frame(Q)
+QQQ <- cbind(variable=row.names(QQ), QQ)
+QI <- arrange(QQQ, desc(MeanDecreaseGini))
+```
+
+#### **RF Model 3**  
+
+```{r,eval=FALSE}
+set.seed(30497)
+rfTrain3 <- randomForest(Train[,-53], Train$classe, ntree=2048, importance=TRUE, do.trace=FALSE)
+
+```
+
+#### **RF Model 4**  
+
+The username variable was excluded in training the fourth random forest model (rfTrain4).  Predictive power did not seem impaired (as estimated by validation set accuracy). However, with rf model 2 a small number of predictors are very important for the classification scheme (by mean decrease in Gini), in rf model 4 many variables are at least moderately important (see figures). 
+
+```{r,cache=TRUE}
+set.seed(9233)
+
+ctrl2 <- trainControl(method = "adaptive_cv", repeats = 5, verboseIter = FALSE)
+rfTrain4 <- train(classe ~ ., method = "rf", data = Train[,-1], importance = T, trControl = ctrl2)
+predrfTrain4 <- predict(rfTrain4, newdata = Train)
+predrfVal4 <- predict(rfTrain4, newdata = Valid)
+rfCMT4 <- confusionMatrix(predrfTrain4, Train$classe)
+rfCMV4 <- confusionMatrix(predrfVal4, Valid$classe)
+
+
+## Training Set Accuracy
+rfCMT4$table
+postResample(predrfTrain4, Train$classe)
+
+## Validation Set Accuracy
+rfCMV4$table
+postResample(predrfVal4, Valid$classe)
+```
+
+```{r echo=FALSE}
+P <- rfTrain4$finalModel$importance
+PP <- data.frame(P)
+PPP <- cbind(variable=row.names(PP), PP)
+PI <- arrange(PPP, desc(MeanDecreaseGini))
+```
+```{r}
+rfT4fM <- rfTrain4$finalModel
+varImpPlot(rfT4fM, sort=TRUE, type=2, scale=TRUE, main ="Random Forest Model 4, Variable Importance")
+```
+
+## **Summary of Models**
+
+_Accuracy (%)_  
+
+```{r, echo=FALSE}
+mod.sum <- read.csv("model_summary1.csv", row.names = 1)
+mod.sum
+```
